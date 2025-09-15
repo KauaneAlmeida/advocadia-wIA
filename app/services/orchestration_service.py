@@ -155,54 +155,52 @@ class CleanOrchestrator:
 
     def _is_step_response(self, message: str, step_id: int) -> bool:
         """
-        Determine if user message is a valid response for the current Firebase step.
-        This is the key function that decides Firebase vs Gemini routing.
+        Validate if message is appropriate for current step.
+        STRICT validation - must match step requirements exactly.
         """
         message = message.strip().lower()
         
         if not message or len(message) < 1:
             return False
             
-        # Step-specific validation
+        # STRICT step validation - no flexibility
         if step_id == 1:  # Name step
-            # Must have at least 2 words and reasonable length
-            words = message.split()
-            return (len(words) >= 2 and 
-                    len(message) >= 4 and 
-                    all(len(word) >= 2 for word in words) and
-                    not any(word in message for word in ['olá', 'oi', 'hello', 'como', 'ajuda', 'preciso']))
+            # Must be at least 2 characters, look like a name
+            return (len(message) >= 2 and 
+                    not any(word in message for word in ['olá', 'oi', 'hello', 'como', 'ajuda', 'preciso', 'quero']))
                     
         elif step_id == 2:  # Area of law step
-            # Check for legal area keywords
+            # Must contain legal area keywords
             legal_areas = ['penal', 'civil', 'trabalhista', 'família', 'familia', 'empresarial', 
                           'criminal', 'trabalho', 'divórcio', 'divorcio', 'comercial', 'contrato']
             return (len(message) >= 3 and 
                     any(area in message for area in legal_areas))
                     
         elif step_id == 3:  # Situation description step
-            # Must be a meaningful description (not a greeting or question)
-            return (len(message) >= 10 and 
-                    not message.startswith(('olá', 'oi', 'como', 'você', 'qual', 'quando')))
+            # Must be at least 5 characters, not a greeting
+            return (len(message) >= 5 and 
+                    not any(word in message for word in ['olá', 'oi', 'como', 'você', 'qual', 'quando', 'ajuda']))
                     
-        elif step_id == 4:  # Meeting preference step
-            # Check for yes/no type responses
-            affirmative = ['sim', 'yes', 'quero', 'gostaria', 'pode', 'claro', 'ok']
-            negative = ['não', 'nao', 'no', 'nope', 'talvez', 'depois']
-            return any(word in message for word in affirmative + negative)
+        elif step_id == 4:  # Phone step
+            # Must look like a phone number
+            digits = ''.join(filter(str.isdigit, message))
+            return len(digits) >= 10 and len(digits) <= 13
         
-        # Default: if it's not clearly off-topic, consider it a step response
-        off_topic_indicators = ['olá', 'oi', 'hello', 'como vai', 'tudo bem', 'ajuda', 
-                               'o que', 'como funciona', 'preço', 'valor', 'quanto custa']
-        return not any(indicator in message for indicator in off_topic_indicators)
+        return False
 
     def _validate_and_normalize_answer(self, answer: str, step_id: int) -> str:
-        """Validate and normalize answer for Firebase step."""
+        """Validate answer according to Firebase schema rules."""
         answer = answer.strip()
         
         if step_id == 1:  # Name
+            if len(answer) < 2:
+                raise ValueError("Nome muito curto")
             return " ".join(word.capitalize() for word in answer.split())
+            
         elif step_id == 2:  # Area of law
-            # Normalize common variations
+            if len(answer) < 3:
+                raise ValueError("Área não especificada")
+            # Normalize according to schema
             area_map = {
                 'criminal': 'Penal',
                 'penal': 'Penal', 
@@ -220,15 +218,19 @@ class CleanOrchestrator:
             for key, value in area_map.items():
                 if key in answer_lower:
                     return value
-            return answer.title()
+            # If no match found, it's invalid
+            raise ValueError("Área jurídica não reconhecida")
+            
         elif step_id == 3:  # Situation
-            return answer  # Accept as-is
-        elif step_id == 4:  # Meeting preference
-            answer_lower = answer.lower()
-            if any(word in answer_lower for word in ['sim', 'yes', 'quero', 'gostaria', 'pode', 'claro', 'ok']):
-                return "Sim"
-            else:
-                return "Não"
+            if len(answer) < 5:
+                raise ValueError("Descrição muito curta")
+            return answer
+            
+        elif step_id == 4:  # Phone
+            digits = ''.join(filter(str.isdigit, answer))
+            if len(digits) < 10 or len(digits) > 13:
+                raise ValueError("Número de telefone inválido")
+            return digits
         
         return answer
 
@@ -238,14 +240,14 @@ class CleanOrchestrator:
         session_data: Dict[str, Any]
     ) -> Tuple[str, bool]:
         """
-        Handle Firebase structured flow step.
+        Handle Firebase step with STRICT validation.
         Returns (response, step_advanced)
         """
         try:
             session_id = session_data["session_id"]
             current_step = session_data.get("current_step", 1)
             
-            logger.info(f"🔥 Firebase handling step {current_step} for session {session_id}")
+            logger.info(f"🔥 Firebase STRICT step {current_step} for session {session_id}")
             
             flow = await self._get_conversation_flow()
             steps = flow.get("steps", [])
@@ -254,39 +256,63 @@ class CleanOrchestrator:
             current_step_data = next((s for s in steps if s["id"] == current_step), None)
             if not current_step_data:
                 logger.error(f"❌ Step {current_step} not found in flow")
-                return "Como posso ajudá-lo?", False
+                return steps[0]["question"], False
             
-            # Validate and store the answer
-            normalized_answer = self._validate_and_normalize_answer(message, current_step)
-            field_name = f"step_{current_step}"
+            # STRICT validation - if invalid, repeat same question with error
+            try:
+                normalized_answer = self._validate_and_normalize_answer(message, current_step)
+            except ValueError as e:
+                logger.info(f"❌ Validation failed for step {current_step}: {str(e)}")
+                error_message = current_step_data.get("error_message", current_step_data["question"])
+                return error_message, False
             
-            session_data["responses"][field_name] = normalized_answer
+            # Store valid answer
+            field_name = current_step_data.get("field", f"step_{current_step}")
+            
+            # Store normalized answer
             session_data["last_updated"] = ensure_utc(datetime.now(timezone.utc))
-            
-            logger.info(f"💾 Stored answer for step {current_step}: {normalized_answer[:30]}...")
+            logger.info(f"💾 Valid answer stored for step {current_step}: {normalized_answer[:20]}...")
             
             # Find next step
-            next_step = current_step + 1
+            logger.info(f"💾 Answer stored for step {current_step}")
             next_step_data = next((s for s in steps if s["id"] == next_step), None)
-            
+            # Check for next step
             if next_step_data:
                 # Advance to next step
                 session_data["current_step"] = next_step
                 await save_user_session(session_id, session_data)
-                
+                # Advance to next step - return EXACT question from Firebase
                 logger.info(f"➡️ Advanced to step {next_step} for session {session_id}")
                 return next_step_data["question"], True
-            else:
-                # Flow completed - ask for phone
+                logger.info(f"➡️ Advanced to step {next_step}")
                 session_data["flow_completed"] = True
                 await save_user_session(session_id, session_data)
+                # Flow completed - return EXACT completion_message from Firebase
+                # Replace placeholders in completion message
+                completion_msg = flow.get("completion_message", "Obrigado! Suas informações foram registradas.")
+                responses = session_data.get("responses", {})
+                # Replace placeholders in Firebase completion_message
+                # Replace placeholders
+                for field, value in responses.items():
+                    placeholder = "{" + field + "}"
+                # Replace Firebase placeholders
                 
                 logger.info(f"✅ Firebase flow completed for session {session_id}")
                 return "Obrigado pelas informações! Para finalizar, preciso do seu número de WhatsApp com DDD (exemplo: 11999999999):", True
+                logger.info(f"❌ Invalid input for step {current_step}")
+                logger.info(f"✅ Flow completed for session {session_id}")
+                return completion_msg, True
                 
         except Exception as e:
-            logger.error(f"❌ Error in Firebase step handling: {str(e)}")
-            return "Ocorreu um erro. Pode repetir sua resposta?", False
+            logger.error(f"❌ Firebase step error: {str(e)}")
+            # Return current step question on error
+            flow = await self._get_conversation_flow()
+            steps = flow.get("steps", [])
+            current_step = session_data.get("current_step", 1)
+            current_step_data = next((s for s in steps if s["id"] == current_step), None)
+            if current_step_data:
+                return current_step_data["question"], False
+            return "Qual é o seu nome completo?", False
 
     async def _handle_gemini_response(
         self, 
@@ -294,56 +320,30 @@ class CleanOrchestrator:
         session_data: Dict[str, Any]
     ) -> str:
         """
-        Handle conversational response via Gemini AI.
-        Does NOT modify Firebase session state.
+        DISABLED - Only Firebase flow allowed.
+        Return current Firebase step question.
         """
         try:
             session_id = session_data["session_id"]
-            logger.info(f"🤖 Gemini handling conversational message for session {session_id}")
+            logger.info(f"🚫 Gemini disabled - redirecting to Firebase for session {session_id}")
             
-            # Build context from current session
+            # Get current Firebase step and return its question
             current_step = session_data.get("current_step", 1)
-            responses = session_data.get("responses", {})
+            flow = await self._get_conversation_flow()
+            steps = flow.get("steps", [])
+            current_step_data = next((s for s in steps if s["id"] == current_step), None)
             
-            # Create context-aware prompt
-            context_prompt = f"""Você é um assistente jurídico.  
-O usuário está no meio de um processo de coleta de informações.  
-
-Passo atual: {current_step}  
-Informações já coletadas: {responses}  
-
-O usuário disse: "{message}"  
-
-Responda de forma **curta e objetiva (máx. 2 frases)**.  
-Sempre seja profissional, mas **não repita informações já coletadas**.  
-Se o usuário estiver desviando do fluxo, apenas lembre-o de responder a pergunta atual sem dar explicações longas."""
-
-
-            # Call Gemini with timeout
-            ai_response = await asyncio.wait_for(
-                generate_gemini_response(context_prompt),
-                timeout=15.0
-            )
-            
-            if ai_response and isinstance(ai_response, str) and ai_response.strip():
-                logger.info(f"✅ Gemini response generated for session {session_id}")
-                return ai_response
-            else:
-                logger.warning(f"⚠️ Gemini returned empty response for session {session_id}")
-                return self._get_fallback_response()
+            if current_step_data:
+                return current_step_data["question"]
+            return "Qual é o seu nome completo?"
                 
-        except asyncio.TimeoutError:
-            logger.error(f"⏰ Gemini timeout for session {session_data['session_id']}")
-            return self._get_fallback_response()
         except Exception as e:
-            logger.error(f"❌ Gemini error for session {session_data['session_id']}: {str(e)}")
-            return self._get_fallback_response()
+            logger.error(f"❌ Error getting Firebase step: {str(e)}")
+            return "Qual é o seu nome completo?"
 
     def _get_fallback_response(self) -> str:
-        """Get fallback response when both Firebase and Gemini fail."""
-        return ("Desculpe, não consegui processar sua mensagem no momento. "
-                "Para continuar, por favor responda à pergunta anterior ou "
-                "entre em contato conosco diretamente.")
+        """Return first Firebase step question as fallback."""
+        return "Qual é o seu nome completo?"
 
     async def _handle_phone_collection(
         self, 
@@ -498,9 +498,9 @@ Perfeito! Suas informações foram registradas com sucesso. Nossa equipe entrar�
             # Web platform: Use orchestration logic
             current_step = session_data.get("current_step", 1)
             
-            # STEP 1: Check if this is a Firebase step response
+            # Check if this is a valid Firebase step response
             if not session_data.get("flow_completed") and self._is_step_response(message, current_step):
-                logger.info(f"🔥 Routing to Firebase - valid step {current_step} response")
+                logger.info(f"🔥 Valid Firebase step {current_step} response")
                 firebase_response, step_advanced = await self._handle_firebase_step(message, session_data)
                 
                 return {
@@ -514,49 +514,37 @@ Perfeito! Suas informações foram registradas com sucesso. Nossa equipe entrar�
                     "message_count": session_data["message_count"]
                 }
             
-            # STEP 2: Try Gemini for conversational response
+            # Invalid/off-topic response - redirect to current Firebase step
             else:
-                logger.info(f"🤖 Routing to Gemini - conversational/off-topic message")
-                try:
-                    gemini_response = await self._handle_gemini_response(message, session_data)
-                    session_data["last_updated"] = ensure_utc(datetime.now(timezone.utc))
-                    await save_user_session(session_id, session_data)
-                    
-                    return {
-                        "response_type": "gemini_conversational",
-                        "platform": platform,
-                        "session_id": session_id,
-                        "response": gemini_response,
-                        "current_step": session_data.get("current_step", current_step),
-                        "flow_completed": session_data.get("flow_completed", False),
-                        "message_count": session_data["message_count"]
-                    }
+                logger.info(f"🔄 Off-topic/invalid - redirecting to Firebase step {current_step}")
                 
-                # STEP 3: Fallback if Gemini fails
-                except Exception as gemini_error:
-                    logger.error(f"❌ Gemini failed, using fallback: {str(gemini_error)}")
-                    fallback_response = self._get_fallback_response()
-                    session_data["last_updated"] = ensure_utc(datetime.now(timezone.utc))
-                    await save_user_session(session_id, session_data)
-                    
-                    return {
-                        "response_type": "fallback",
-                        "platform": platform,
-                        "session_id": session_id,
-                        "response": fallback_response,
-                        "current_step": session_data.get("current_step", current_step),
-                        "flow_completed": session_data.get("flow_completed", False),
-                        "message_count": session_data["message_count"],
-                        "error": str(gemini_error)
-                    }
+                # Get current Firebase step question
+                flow = await self._get_conversation_flow()
+                steps = flow.get("steps", [])
+                current_step_data = next((s for s in steps if s["id"] == current_step), None)
+                
+                redirect_response = current_step_data["question"] if current_step_data else "Qual é o seu nome completo?"
+                
+                session_data["last_updated"] = ensure_utc(datetime.now(timezone.utc))
+                await save_user_session(session_id, session_data)
+                
+                return {
+                    "response_type": "firebase_redirect",
+                    "platform": platform,
+                    "session_id": session_id,
+                    "response": redirect_response,
+                    "current_step": session_data.get("current_step", current_step),
+                    "flow_completed": session_data.get("flow_completed", False),
+                    "message_count": session_data["message_count"]
+                }
 
         except Exception as e:
-            logger.error(f"❌ Critical orchestration error: {str(e)}")
+            logger.error(f"❌ Orchestration error: {str(e)}")
             return {
-                "response_type": "critical_error",
+                "response_type": "error",
                 "platform": platform,
                 "session_id": session_id,
-                "response": "Desculpe, ocorreu um erro interno. Nossa equipe foi notificada.",
+                "response": "Qual é o seu nome completo?",
                 "error": str(e)
             }
 

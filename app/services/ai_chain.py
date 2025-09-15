@@ -1,341 +1,620 @@
 """
-LangChain + Gemini Integration Service
+Intelligent Orchestration Service
 
-Este módulo integra o LangChain com o Google Gemini para gerenciamento de
-conversas inteligentes, memória e geração de respostas contextuais.
+This service implements a clean separation between Firebase (structured flow) 
+and Gemini AI (conversational responses) with proper fallback handling.
+
+Orchestration Logic:
+1. Firebase as main flow controller (source of truth for steps)
+2. Gemini as secondary assistant (for off-topic/conversational responses)
+3. Fallback handling (last resort for failures)
+
+Flow: User message → Orchestrator → [Firebase OR Gemini OR Fallback]
 """
 
-import os
 import logging
 import json
+import os
 import asyncio
-from typing import Dict, Any, Optional
-from dotenv import load_dotenv
-from langchain.memory import ConversationBufferWindowMemory
-from langchain.schema import HumanMessage, AIMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.schema.runnable import RunnablePassthrough
-from langchain.schema.output_parser import StrOutputParser
+from typing import Dict, Any, Optional, Tuple
+from datetime import datetime, timezone
+from app.services.firebase_service import (
+    get_user_session,
+    save_user_session,
+    save_lead_data,
+    get_conversation_flow,
+    get_firebase_service_status
+)
+from app.services.gemini_service import generate_gemini_response, get_gemini_service_status
+from app.services.baileys_service import baileys_service
 
-# Load environment variables
-load_dotenv()
-
-# Configure logging
 logger = logging.getLogger(__name__)
 
-# Global conversation memories
-conversation_memories: Dict[str, ConversationBufferWindowMemory] = {}
+
+def ensure_utc(dt: datetime) -> datetime:
+    """Ensure datetime is UTC timezone aware."""
+    if dt is None:
+        return datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
-class AIOrchestrator:
-    """AI Orchestrator using LangChain + Gemini for intelligent conversation management."""
+class CleanOrchestrator:
+    """
+    Clean orchestration service with proper separation of concerns.
+    Firebase handles structured flow, Gemini handles conversational responses.
+    """
 
     def __init__(self):
-        self.llm = None
-        self.system_prompt = None
-        self.chain = None
-        self._initialize_llm()
-        self._load_system_prompt()
-        self._setup_chain()
-
-    def _initialize_llm(self):
-        """Initialize Gemini LLM via LangChain."""
+        self.law_firm_number = "+5511918368812"
+        self.flow_cache = None
+        self.cache_timestamp = None
+        
+    async def get_overall_service_status(self) -> Dict[str, Any]:
+        """Get comprehensive service status."""
         try:
-            # Get API key from environment - try both variable names
-            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            # Check Firebase status
+            firebase_status = await get_firebase_service_status()
             
-            if not api_key:
-                logger.warning("⚠️ GOOGLE_API_KEY or GEMINI_API_KEY environment variable not set")
-                self.llm = None
-                return
-
-            self.llm = ChatGoogleGenerativeAI(
-                model="gemini-1.5-flash",
-                google_api_key=api_key,
-                temperature=0.7,
-                max_tokens=1000,
-                timeout=30,
-                convert_system_message_to_human=True
-            )
-            logger.info("✅ LangChain + Gemini LLM initialized successfully")
-        except Exception as e:
-            logger.error(f"❌ Error initializing LLM: {str(e)}")
-            self.llm = None
-
-    def _load_system_prompt(self):
-        """Load system prompt from .env, JSON file, or use default."""
-        try:
-            env_prompt = os.getenv("AI_SYSTEM_PROMPT")
-            if env_prompt:
-                self.system_prompt = env_prompt
-                logger.info("✅ System prompt loaded from environment variable")
-                return
-
-            schema_file = "ai_schema.json"
-            if os.path.exists(schema_file):
-                with open(schema_file, "r", encoding="utf-8") as f:
-                    schema_data = json.load(f)
-                    self.system_prompt = schema_data.get("system_prompt", "")
-                    if self.system_prompt:
-                        logger.info("✅ System prompt loaded from ai_schema.json")
-                        return
-
-            self.system_prompt = self._get_default_system_prompt()
-            logger.info("✅ Using default system prompt")
+            # Check Gemini AI status
+            gemini_status = await get_gemini_service_status()
+            
+            # Determine overall status
+            firebase_healthy = firebase_status.get("status") == "active"
+            gemini_healthy = gemini_status.get("status") == "active"
+            
+            if firebase_healthy and gemini_healthy:
+                overall_status = "active"
+            elif firebase_healthy:
+                overall_status = "degraded"  # Firebase works, AI doesn't
+            else:
+                overall_status = "error"  # Firebase issues are critical
+            
+            return {
+                "overall_status": overall_status,
+                "firebase_status": firebase_status,
+                "gemini_status": gemini_status,
+                "features": {
+                    "structured_flow": firebase_healthy,
+                    "ai_responses": gemini_healthy,
+                    "fallback_mode": firebase_healthy and not gemini_healthy,
+                    "whatsapp_integration": True,
+                    "lead_collection": firebase_healthy
+                },
+                "orchestration_mode": "firebase_primary_gemini_secondary"
+            }
             
         except Exception as e:
-            logger.error(f"❌ Error loading system prompt: {str(e)}")
-            self.system_prompt = self._get_default_system_prompt()
+            logger.error(f"❌ Error getting overall service status: {str(e)}")
+            return {
+                "overall_status": "error",
+                "firebase_status": {"status": "error", "error": str(e)},
+                "gemini_status": {"status": "error", "error": str(e)},
+                "features": {},
+                "error": str(e)
+            }
 
-    def _get_default_system_prompt(self) -> str:
-        """Default system prompt para coleta de informações jurídicas no WhatsApp."""
-        return """Você é um assistente virtual de um escritório de advocacia no Brasil. 
-Seu papel é apenas **coletar informações básicas do cliente** para que um advogado humano dê continuidade.
-
-
-## INFORMAÇÕES A COLETAR:
-1. Nome completo.
-2. Área jurídica (Penal, Civil, Trabalhista, Família, Empresarial).
-3. Breve descrição da situação.
-4. Número de WhatsApp válido (com DDD).
-5. Encerrar agradecendo e avisando que o time jurídico entrará em contato.
-
-## REGRAS IMPORTANTES:
-- Sempre responda em português brasileiro.
-- Não repita a mesma pergunta da mesma forma** se o cliente não souber responder; reformule de forma natural.
-- Nunca ofereça agendamento automático ou horários de consulta.
-- Não escreva textos longos: use no máximo 2 frases por resposta.
-- Confirme cada informação antes de seguir para a próxima.
-- A ordem da coleta é: Nome completo → Área jurídica → Descrição da situação → Número de WhatsApp.
-- Peça o número de WhatsApp **somente no final**.
-- Use linguagem simples, direta e acolhedora.
-- Sempre caminhe para coletar todas as informações, sem pressionar.
-
-## FORMATO DA CONVERSA:
-- Seja objetivo e humano, como em uma conversa normal de WhatsApp.
-- Sempre finalize cada mensagem com uma pergunta que leve o cliente a responder.
-- Se já tiver a resposta de algum item no contexto, não repita a pergunta.
-
-
-Você **não agenda consultas**, apenas coleta as informações e organiza para o time jurídico."""
-
-    def _setup_chain(self):
-        """Create LangChain conversation chain."""
+    async def _get_conversation_flow(self) -> Dict[str, Any]:
+        """Get conversation flow with 5-minute caching."""
         try:
-            if self.llm is None:
-                logger.warning("⚠️ Cannot setup chain - LLM not initialized")
-                self.chain = None
-                return
+            if (self.flow_cache is None or 
+                self.cache_timestamp is None or
+                (datetime.now(timezone.utc) - self.cache_timestamp).seconds > 300):
                 
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", self.system_prompt),
-                MessagesPlaceholder(variable_name="history"),
-                ("human", "{input}"),
-            ])
-
-            self.chain = (
-                RunnablePassthrough.assign(
-                    history=lambda x: self._get_session_history(
-                        x.get("session_id", "default")
-                    )
-                )
-                | prompt
-                | self.llm
-                | StrOutputParser()
-            )
-            logger.info("✅ LangChain conversation chain setup complete")
+                self.flow_cache = await get_conversation_flow()
+                self.cache_timestamp = datetime.now(timezone.utc)
+                logger.info("📋 Conversation flow loaded from Firebase")
+            
+            return self.flow_cache
         except Exception as e:
-            logger.error(f"❌ Error setting up chain: {str(e)}")
-            self.chain = None
+            logger.error(f"❌ Error loading conversation flow: {str(e)}")
+            # Return minimal default flow
+            return {
+                "steps": [
+                    {"id": 1, "question": "Qual é o seu nome completo?"},
+                    {"id": 2, "question": "Em qual área do direito você precisa de ajuda?"},
+                    {"id": 3, "question": "Descreva brevemente sua situação."},
+                    {"id": 4, "question": "Gostaria de agendar uma consulta?"}
+                ],
+                "completion_message": "Obrigado! Suas informações foram registradas."
+            }
 
-    def _get_session_history(self, session_id: str) -> list:
-        """Get session conversation history."""
-        if session_id not in conversation_memories:
-            conversation_memories[session_id] = ConversationBufferWindowMemory(
-                k=10, return_messages=True
-            )
-        return conversation_memories[session_id].chat_memory.messages
+    async def _get_or_create_session(
+        self,
+        session_id: str,
+        platform: str,
+        phone_number: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Get existing session or create new one."""
+        session_data = await get_user_session(session_id)
+        
+        if not session_data:
+            session_data = {
+                "session_id": session_id,
+                "platform": platform,
+                "created_at": ensure_utc(datetime.now(timezone.utc)),
+                "current_step": 1,
+                "responses": {},
+                "flow_completed": False,
+                "phone_collected": False,
+                "message_count": 0,
+                "last_updated": ensure_utc(datetime.now(timezone.utc))
+            }
+            logger.info(f"🆕 Created new session {session_id} for platform {platform}")
 
-    async def generate_response(
+        if phone_number:
+            session_data["phone_number"] = phone_number
+
+        return session_data
+
+    def _is_phone_number(self, message: str) -> bool:
+        """Check if message looks like a Brazilian phone number."""
+        clean_message = ''.join(filter(str.isdigit, message))
+        return len(clean_message) >= 10 and len(clean_message) <= 13
+
+    def _is_step_response(self, message: str, step_id: int) -> bool:
+        """
+        Validate if message is appropriate for current step.
+        STRICT validation - must match step requirements exactly.
+        """
+        message = message.strip().lower()
+        
+        if not message or len(message) < 1:
+            return False
+            
+        # STRICT step validation - no flexibility
+        if step_id == 1:  # Name step
+            # Must be at least 2 characters, look like a name
+            return (len(message) >= 2 and 
+            # Must contain legal area keywords
+            legal_areas = ['penal', 'civil', 'trabalhista', 'família', 'familia', 'empresarial', 
+                          'criminal', 'trabalho', 'divórcio', 'divorcio', 'comercial', 'contrato']
+            return (len(message) >= 3 and 
+                    any(area in message for area in legal_areas))
+                    
+        elif step_id == 3:  # Situation description step
+        elif step_id == 4:  # Phone step
+            # Must look like a phone number
+            digits = ''.join(filter(str.isdigit, message))
+            return len(digits) >= 10 and len(digits) <= 13
+            # Must look like a phone number
+        return False
+
+    def _validate_and_normalize_answer(self, answer: str, step_id: int) -> str:
+        """Validate answer according to Firebase schema rules."""
+        answer = answer.strip()
+        
+        if step_id == 1:  # Name
+            if len(answer) < 2:
+                raise ValueError("Nome muito curto")
+            if len(answer) < 2:
+                raise ValueError("Nome muito curto")
+            return " ".join(word.capitalize() for word in answer.split())
+            
+            
+        elif step_id == 2:  # Area of law
+            if len(answer) < 3:
+                raise ValueError("Área não especificada")
+            # Normalize according to schema
+                raise ValueError("Área não especificada")
+            # Normalize according to schema
+            area_map = {
+                'criminal': 'Penal',
+                'penal': 'Penal', 
+                'trabalho': 'Trabalhista',
+                'trabalhista': 'Trabalhista',
+                'família': 'Família',
+                'familia': 'Família',
+                'divórcio': 'Família',
+                'divorcio': 'Família',
+                'civil': 'Civil',
+                'empresarial': 'Empresarial',
+                'comercial': 'Empresarial'
+            }
+            answer_lower = answer.lower()
+            for key, value in area_map.items():
+                if key in answer_lower:
+                    return value
+            # If no match found, it's invalid
+            raise ValueError("Área jurídica não reconhecida")
+            
+            raise ValueError("Área jurídica não reconhecida")
+            
+        elif step_id == 3:  # Situation
+            if len(answer) < 5:
+                raise ValueError("Descrição muito curta")
+            return answer
+            
+        elif step_id == 4:  # Phone
+            digits = ''.join(filter(str.isdigit, answer))
+            if len(digits) < 10 or len(digits) > 13:
+                raise ValueError("Número de telefone inválido")
+            return digits
+                raise ValueError("Número de telefone inválido")
+            return digits
+        
+        return answer
+
+    async def _handle_firebase_step(
         self, 
         message: str, 
-        session_id: str = "default",
-        context: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """Generate AI response using LangChain + Gemini with context."""
+        session_data: Dict[str, Any]
+    ) -> Tuple[str, bool]:
+        """
+        Handle Firebase step with STRICT validation.
+        Returns (response, step_advanced)
+        """
         try:
-            if self.llm is None:
-                raise Exception("LLM not initialized - check API key configuration")
-                
-            if session_id not in conversation_memories:
-                conversation_memories[session_id] = ConversationBufferWindowMemory(
-                    k=10, return_messages=True
-                )
-
-            memory = conversation_memories[session_id]
+            session_id = session_data["session_id"]
+            current_step = session_data.get("current_step", 1)
             
-            contextual_message = message
-            if context and isinstance(context, dict):
-                context_info = []
-                if context.get("name"):
-                    context_info.append(f"Nome: {context['name']}")
-                if context.get("area_of_law"):
-                    context_info.append(f"Área jurídica: {context['area_of_law']}")
-                if context.get("situation"):
-                    context_info.append(f"Situação: {context['situation']}")
-                if context.get("platform"):
-                    context_info.append(f"Plataforma: {context['platform']}")
-                
-                if context_info:
-                    contextual_message = f"[Contexto: {'; '.join(context_info)}] {message}"
-
-            # Add timeout and better error handling
+            logger.info(f"🔥 Firebase STRICT step {current_step} for session {session_id}")
             
+            flow = await self._get_conversation_flow()
+            steps = flow.get("steps", [])
+            
+            # Find current step
+            current_step_data = next((s for s in steps if s["id"] == current_step), None)
+            if not current_step_data:
+                logger.error(f"❌ Step {current_step} not found in flow")
+                return steps[0]["question"], False
+            
+            # STRICT validation - if invalid, repeat same question with error
             try:
-                response = await asyncio.wait_for(
-                    self.chain.ainvoke({
-                        "input": contextual_message, 
-                        "session_id": session_id
-                    }),
-                    timeout=15.0  # 15 second timeout
-                )
-            except asyncio.TimeoutError:
-                logger.error("⏰ Gemini API request timed out")
-                raise Exception("API timeout - quota may be exceeded")
-            except Exception as api_error:
-                # Check for quota/rate limit errors
-                error_str = str(api_error).lower()
-                if any(indicator in error_str for indicator in ["429", "quota", "rate limit", "resourceexhausted", "billing"]):
-                    logger.error(f"🚫 Gemini API quota/rate limit error: {api_error}")
-                    raise Exception(f"Quota exceeded: {api_error}")
-                else:
-                    logger.error(f"❌ Gemini API error: {api_error}")
-                    raise api_error
-
-            memory.chat_memory.add_user_message(message)
-            memory.chat_memory.add_ai_message(response)
-
-            logger.info(f"✅ Generated AI response for session {session_id}")
-            return response
-
+                normalized_answer = self._validate_and_normalize_answer(message, current_step)
+            except ValueError as e:
+                logger.info(f"❌ Validation failed for step {current_step}: {str(e)}")
+                error_message = current_step_data.get("error_message", current_step_data["question"])
+                return error_message, False
+            # STRICT validation - if invalid, repeat same question with error
+            try:
+                normalized_answer = self._validate_and_normalize_answer(message, current_step)
+            except ValueError as e:
+                logger.info(f"❌ Validation failed for step {current_step}: {str(e)}")
+                error_message = current_step_data.get("error_message", current_step_data["question"])
+                return error_message, False
+            
+            # Store valid answer
+            field_name = current_step_data.get("field", f"step_{current_step}")
+            
+            # Store normalized answer
+            session_data["last_updated"] = ensure_utc(datetime.now(timezone.utc))
+            logger.info(f"💾 Valid answer stored for step {current_step}: {normalized_answer[:20]}...")
+            
+            # Find next step
+            logger.info(f"💾 Answer stored for step {current_step}")
+            next_step_data = next((s for s in steps if s["id"] == next_step), None)
+            # Check for next step
+            if next_step_data:
+                # Advance to next step
+                session_data["current_step"] = next_step
+                await save_user_session(session_id, session_data)
+                # Advance to next step - return EXACT question from Firebase
+                logger.info(f"➡️ Advanced to step {next_step} for session {session_id}")
+                return next_step_data["question"], True
+                logger.info(f"➡️ Advanced to step {next_step}")
+                # Flow completed - show completion message
+                await save_user_session(session_id, session_data)
+                # Flow completed - return EXACT completion_message from Firebase
+                # Replace placeholders in completion message
+                completion_msg = flow.get("completion_message", "Obrigado! Suas informações foram registradas.")
+                responses = session_data.get("responses", {})
+                # Replace placeholders in Firebase completion_message
+                # Replace placeholders
+                for field, value in responses.items():
+                    placeholder = "{" + field + "}"
+                # Replace Firebase placeholders
+                
+                logger.info(f"✅ Firebase flow completed for session {session_id}")
+                return "Obrigado pelas informações! Para finalizar, preciso do seu número de WhatsApp com DDD (exemplo: 11999999999):", True
+                logger.info(f"❌ Invalid input for step {current_step}")
+                logger.info(f"✅ Flow completed for session {session_id}")
+                return completion_msg, True
+                
         except Exception as e:
-            logger.error(f"❌ Error generating response: {str(e)}")
-            # Re-raise the exception so orchestrator can handle it properly
-            raise e
+            logger.error(f"❌ Firebase step error: {str(e)}")
+            # Return current step question on error
+            flow = await self._get_conversation_flow()
+            steps = flow.get("steps", [])
+            current_step = session_data.get("current_step", 1)
+            current_step_data = next((s for s in steps if s["id"] == current_step), None)
+            if current_step_data:
+                return current_step_data["question"], False
+            return "Qual é o seu nome completo?", False
+
+    async def _handle_gemini_response(
+        self, 
+        message: str, 
+        session_data: Dict[str, Any]
+    ) -> str:
+        """
+        DISABLED - Only Firebase flow allowed.
+        Return current Firebase step question.
+        """
+        try:
+            session_id = session_data["session_id"]
+            logger.info(f"🚫 Gemini disabled - redirecting to Firebase for session {session_id}")
+            
+            # Get current Firebase step and return its question
+            current_step = session_data.get("current_step", 1)
+            flow = await self._get_conversation_flow()
+            steps = flow.get("steps", [])
+            current_step_data = next((s for s in steps if s["id"] == current_step), None)
+            
+            if current_step_data:
+                return current_step_data["question"]
+            return "Qual é o seu nome completo?"
+                
+        except Exception as e:
+            logger.error(f"❌ Error getting Firebase step: {str(e)}")
+            return "Qual é o seu nome completo?"
 
     def _get_fallback_response(self) -> str:
-        """Fallback response when AI fails."""
-        return (
-            "Peço desculpas, mas estou enfrentando dificuldades técnicas no momento.\n\n"
-            "Para garantir que você receba o melhor atendimento jurídico, recomendo "
-            "que entre em contato diretamente com nossa equipe pelo telefone "
-            "ou agende uma consulta presencial."
-        )
+        """Return first Firebase step question as fallback."""
+        return "Qual é o seu nome completo?"
 
-    def clear_session_memory(self, session_id: str):
-        """Clear memory for a specific session."""
-        if session_id in conversation_memories:
-            del conversation_memories[session_id]
-            logger.info(f"🧹 Cleared memory for session {session_id}")
+    async def _handle_phone_collection(
+        self, 
+        phone_message: str, 
+        session_id: str, 
+        session_data: Dict[str, Any]
+    ) -> str:
+        """Handle phone number collection and send WhatsApp message."""
+        try:
+            # Clean and validate phone number
+            phone_clean = ''.join(filter(str.isdigit, phone_message))
+            
+            if len(phone_clean) < 10 or len(phone_clean) > 13:
+                return "Número inválido. Por favor, digite no formato com DDD (exemplo: 11999999999):"
 
-    def get_conversation_summary(self, session_id: str) -> Dict[str, Any]:
-        """Get conversation summary for a session."""
-        if session_id not in conversation_memories:
-            return {"messages": 0, "summary": "No conversation history"}
+            # Format phone number for WhatsApp
+            if len(phone_clean) == 10:
+                phone_formatted = f"55{phone_clean[:2]}9{phone_clean[2:]}"
+            elif len(phone_clean) == 11:
+                phone_formatted = f"55{phone_clean}"
+            elif phone_clean.startswith("55"):
+                phone_formatted = phone_clean
+            else:
+                phone_formatted = f"55{phone_clean}"
 
-        messages = conversation_memories[session_id].chat_memory.messages
-        return {
-            "messages": len(messages),
-            "last_messages": [
-                {
-                    "type": "human" if isinstance(m, HumanMessage) else "ai",
-                    "content": m.content[:100] + ("..." if len(m.content) > 100 else ""),
+            whatsapp_number = f"{phone_formatted}@s.whatsapp.net"
+
+            # Update session
+            session_data.update({
+                "phone_number": phone_clean,
+                "phone_formatted": phone_formatted,
+                "phone_collected": True,
+                "last_updated": ensure_utc(datetime.now(timezone.utc))
+            })
+            await save_user_session(session_id, session_data)
+
+            # Save lead data
+            responses = session_data.get("responses", {})
+            answers = []
+            for i in range(1, 5):
+                answer = responses.get(f"step_{i}", "")
+                if answer:
+                    answers.append({"id": i, "answer": answer})
+            
+            # Add phone as final answer
+            answers.append({"id": 5, "answer": phone_clean})
+            
+            try:
+                await save_lead_data({"answers": answers})
+                logger.info(f"💾 Lead saved for session {session_id}")
+            except Exception as save_error:
+                logger.error(f"❌ Error saving lead: {str(save_error)}")
+
+            # Prepare WhatsApp message
+            user_name = responses.get("step_1", "Cliente")
+            area = responses.get("step_2", "não informada")
+            situation = responses.get("step_3", "não detalhada")[:150]
+
+            whatsapp_message = f"""Olá {user_name}! 👋
+
+Recebemos sua solicitação através do nosso site e estamos aqui para ajudá-lo com questões jurídicas.
+
+Nossa equipe especializada está pronta para analisar seu caso.
+
+📄 Resumo do caso:
+- 👤 Nome: {user_name}
+- 📌 Área: {area}
+- 📝 Situação: {situation}
+
+Nossa equipe entrará em contato em breve."""
+
+            # Send WhatsApp message
+            whatsapp_success = False
+            try:
+                await baileys_service.send_whatsapp_message(whatsapp_number, whatsapp_message)
+                logger.info(f"📤 WhatsApp message sent to {phone_formatted}")
+                whatsapp_success = True
+            except Exception as whatsapp_error:
+                logger.error(f"❌ Error sending WhatsApp: {str(whatsapp_error)}")
+
+            # Return confirmation
+            confirmation = f"""Número confirmado: {phone_clean} 📱
+
+Perfeito! Suas informações foram registradas com sucesso. Nossa equipe entrará em contato em breve.
+
+{'✅ Mensagem enviada para seu WhatsApp!' if whatsapp_success else '⚠️ Houve um problema ao enviar a mensagem do WhatsApp, mas suas informações foram salvas.'}"""
+
+            return confirmation
+
+        except Exception as e:
+            logger.error(f"❌ Error handling phone collection: {str(e)}")
+            return "Ocorreu um erro ao processar seu número. Por favor, tente novamente."
+
+    async def process_message(
+        self,
+        message: str,
+        session_id: str,
+        phone_number: Optional[str] = None,
+        platform: str = "web"
+    ) -> Dict[str, Any]:
+        """
+        Main orchestration logic: Firebase → Gemini → Fallback
+        """
+        try:
+            logger.info(f"🎯 Orchestrating message - Session: {session_id}, Platform: {platform}")
+            logger.info(f"📝 Message: '{message[:100]}...'")
+
+            session_data = await self._get_or_create_session(session_id, platform, phone_number)
+            session_data["message_count"] = session_data.get("message_count", 0) + 1
+
+            # Handle phone collection (after flow completion)
+            if (session_data.get("flow_completed") and 
+                not session_data.get("phone_collected") and 
+                self._is_phone_number(message)):
+                
+                logger.info(f"📱 Processing phone number submission")
+                phone_response = await self._handle_phone_collection(message, session_id, session_data)
+                return {
+                    "response_type": "phone_collected",
+                    "platform": platform,
+                    "session_id": session_id,
+                    "response": phone_response,
+                    "phone_collected": True,
+                    "message_count": session_data["message_count"]
                 }
-                for m in messages[-4:]
-            ],
-        }
 
-    def get_system_prompt(self) -> str:
-        """Get current system prompt."""
-        return self.system_prompt
+            # Skip structured flow for WhatsApp platform - use Gemini only
+            if platform == "whatsapp":
+                logger.info(f"📱 WhatsApp platform - using Gemini only")
+                try:
+                    ai_response = await self._handle_gemini_response(message, session_data)
+                    session_data["last_updated"] = ensure_utc(datetime.now(timezone.utc))
+                    await save_user_session(session_id, session_data)
+                    
+                    return {
+                        "response_type": "gemini_whatsapp",
+                        "platform": platform,
+                        "session_id": session_id,
+                        "response": ai_response,
+                        "message_count": session_data["message_count"]
+                    }
+                except Exception as e:
+                    logger.error(f"❌ WhatsApp Gemini error: {str(e)}")
+                    return {
+                        "response_type": "whatsapp_fallback",
+                        "platform": platform,
+                        "session_id": session_id,
+                        "response": "Obrigado pela sua mensagem. Nossa equipe analisará e retornará em breve.",
+                        "message_count": session_data["message_count"]
+                    }
 
+            # Web platform: Use orchestration logic
+            current_step = session_data.get("current_step", 1)
+            
+            # Check if this is a valid Firebase step response
+            if not session_data.get("flow_completed") and self._is_step_response(message, current_step):
+                logger.info(f"🔥 Valid Firebase step {current_step} response")
+                firebase_response, step_advanced = await self._handle_firebase_step(message, session_data)
+                
+                return {
+                    "response_type": "firebase_step",
+                    "platform": platform,
+                    "session_id": session_id,
+                    "response": firebase_response,
+                    "current_step": session_data.get("current_step", current_step),
+                    "step_advanced": step_advanced,
+                    "flow_completed": session_data.get("flow_completed", False),
+                    "message_count": session_data["message_count"]
+                }
+            
+            # Invalid/off-topic response - redirect to current Firebase step
+            else:
+                logger.info(f"🔄 Off-topic/invalid - redirecting to Firebase step {current_step}")
+                
+                # Get current Firebase step question
+                flow = await self._get_conversation_flow()
+                steps = flow.get("steps", [])
+                current_step_data = next((s for s in steps if s["id"] == current_step), None)
+                
+                redirect_response = current_step_data["question"] if current_step_data else "Qual é o seu nome completo?"
+                
+                session_data["last_updated"] = ensure_utc(datetime.now(timezone.utc))
+                await save_user_session(session_id, session_data)
+                
+                # Replace placeholders in completion message
+                completion_msg = flow.get("completion_message", "Obrigado! Suas informações foram registradas.")
+                responses = session_data.get("responses", {})
+                
+                # Replace placeholders
+                for field, value in responses.items():
+                    placeholder = "{" + field + "}"
+                    completion_msg = completion_msg.replace(placeholder, str(value))
+                
+                return {
+                    "response_type": "firebase_redirect",
+                    "platform": platform,
+                    "session_id": session_id,
+                    "response": redirect_response,
+                    "current_step": session_data.get("current_step", current_step),
+                    "flow_completed": session_data.get("flow_completed", False),
+                    "message_count": session_data["message_count"]
+                }
 
-# Global AI orchestrator instance
-ai_orchestrator = AIOrchestrator()
-
-
-# Convenience functions for backward compatibility
-async def process_chat_message(
-    message: str, 
-    session_id: str = "default", 
-    context: Optional[Dict[str, Any]] = None
-) -> str:
-    """Process chat message with LangChain + Gemini."""
-    return await ai_orchestrator.generate_response(message, session_id, context)
-
-
-def clear_conversation_memory(session_id: str):
-    """Clear conversation memory for session."""
-    ai_orchestrator.clear_session_memory(session_id)
-
-
-def get_conversation_summary(session_id: str) -> Dict[str, Any]:
-    """Get conversation summary."""
-    return ai_orchestrator.get_conversation_summary(session_id)
-
-
-async def get_ai_service_status() -> Dict[str, Any]:
-    """Get AI service status."""
-    try:
-        # Quick test without generating a full response to avoid quota usage
-        api_key_configured = bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
-        
-        if not api_key_configured:
+        except Exception as e:
+            logger.error(f"❌ Orchestration error: {str(e)}")
             return {
-                "service": "ai_service",
-                "status": "configuration_required",
-                "error": "API key not configured",
-                "api_key_configured": False,
-                "configuration_required": True,
+                "response_type": "error",
+                "platform": platform,
+                "session_id": session_id,
+                "response": "Qual é o seu nome completo?",
+                "error": str(e)
             }
-        
-        # Test LLM initialization without making API calls
-        if ai_orchestrator.llm is None:
+
+    async def handle_phone_number_submission(
+        self,
+        phone_number: str,
+        session_id: str
+    ) -> Dict[str, Any]:
+        """Handle phone number submission from web interface."""
+        try:
+            session_data = await get_user_session(session_id) or {}
+            response = await self._handle_phone_collection(phone_number, session_id, session_data)
             return {
-                "service": "ai_service",
+                "status": "success",
+                "message": response,
+                "phone_collected": True
+            }
+        except Exception as e:
+            logger.error(f"❌ Error in phone submission: {str(e)}")
+            return {
                 "status": "error",
-                "error": "LLM not initialized",
-                "api_key_configured": api_key_configured,
-                "configuration_required": True,
+                "message": "Erro ao processar número de WhatsApp",
+                "error": str(e)
             }
 
-        return {
-            "service": "ai_service",
-            "status": "active",
-            "message": "LangChain + Gemini operational",
-            "llm_initialized": True,
-            "system_prompt_configured": bool(ai_orchestrator.system_prompt),
-            "api_key_configured": api_key_configured,
-            "features": [
-                "langchain_integration",
-                "gemini_api",
-                "conversation_memory",
-                "session_management",
-                "context_awareness",
-                "brazilian_portuguese_responses",
-            ],
-        }
-    except Exception as e:
-        logger.error(f"❌ Error checking AI service status: {str(e)}")
-        return {
-            "service": "ai_service",
-            "status": "error",
-            "error": str(e),
-            "configuration_required": True,
-            "api_key_configured": bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")),
-        }
+    async def get_session_context(self, session_id: str) -> Dict[str, Any]:
+        """Get current session context and status."""
+        try:
+            session_data = await get_user_session(session_id)
+            if not session_data:
+                return {"exists": False}
+
+            return {
+                "exists": True,
+                "session_id": session_id,
+                "platform": session_data.get("platform", "unknown"),
+                "current_step": session_data.get("current_step", 1),
+                "flow_completed": session_data.get("flow_completed", False),
+                "phone_collected": session_data.get("phone_collected", False),
+                "responses": session_data.get("responses", {}),
+                "message_count": session_data.get("message_count", 0),
+                "created_at": session_data.get("created_at"),
+                "last_updated": session_data.get("last_updated")
+            }
+        except Exception as e:
+            logger.error(f"❌ Error getting session context: {str(e)}")
+            return {"exists": False, "error": str(e)}
 
 
-# Alias for compatibility
-process_with_langchain = process_chat_message
+# Global instance
+clean_orchestrator = CleanOrchestrator()
+
+# Aliases for backward compatibility
+intelligent_orchestrator = clean_orchestrator
+hybrid_orchestrator = clean_orchestrator

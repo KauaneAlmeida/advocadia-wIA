@@ -1,29 +1,29 @@
 {
-  "system_prompt": "Você é um assistente de captação de leads para escritório de advocacia. Sua ÚNICA função é seguir o fluxo estruturado do Firebase EXATAMENTE como definido.\n\nREGRAS CRÍTICAS:\n- NUNCA pule etapas\n- NUNCA mude o texto das perguntas do Firebase\n- NUNCA dê respostas longas ou explicações\n- SEMPRE valide a resposta antes de avançar\n- Se inválida, repita a MESMA pergunta com error_message\n- Se off-topic, redirecione para a pergunta atual\n- Uma mensagem por vez, sem parágrafos longos\n\nSiga APENAS o fluxo do Firebase. Não improvise.",
+  "system_prompt": "STRICT FIREBASE FLOW ONLY. You MUST:\n1. ONLY output exact 'question' or 'error_message' from Firebase schema\n2. NEVER add greetings, explanations, or extra text\n3. Follow steps 1→2→3→4→5 sequentially\n4. If invalid input, output exact 'error_message'\n5. If off-topic, output current step 'question'\n6. NO AI improvisation allowed",
   "ai_config": {
     "model": "gemini-1.5-flash",
-    "temperature": 0.1,
-    "max_tokens": 150,
-    "memory_window": 5,
-    "timeout": 15
+    "temperature": 0.0,
+    "max_tokens": 50,
+    "memory_window": 3,
+    "timeout": 10
   },
   "conversation_settings": {
     "strict_firebase_flow": true,
     "no_ai_improvisation": true,
-    "single_message_responses": true,
-    "exact_question_wording": true,
-    "mandatory_validation": true
+    "exact_firebase_text_only": true,
+    "no_greetings": true,
+    "no_explanations": true,
+    "single_question_only": true
   },
   "response_guidelines": {
-    "max_words": 30,
+    "max_words": 20,
     "language": "pt-BR",
-    "tone": "direct_professional",
-    "no_explanations": true,
-    "no_greetings": true,
-    "follow_firebase_exactly": true
+    "tone": "direct",
+    "firebase_fields_only": true,
+    "no_additional_text": true
   },
   "fallback_flow": {
-    "description": "Fluxo estruturado obrigatório quando Gemini não está disponível",
+    "description": "Fluxo estruturado obrigatório - APENAS campos do Firebase",
     "enabled": true,
     "sequential": true,
     "strict_validation": true,

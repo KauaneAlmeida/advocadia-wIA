@@ -1,77 +1,48 @@
 {
-  "system_prompt": "Você é um assistente jurídico especializado de um escritório de advocacia no Brasil.\n\nDIRETRIZES IMPORTANTES:\n- Responda SEMPRE em português brasileiro\n- Mantenha respostas profissionais, concisas e focadas em questões jurídicas\n- NÃO forneça aconselhamento jurídico específico ou definitivo\n- Sempre recomende consulta presencial para casos específicos\n- Use linguagem acessível, mas técnica quando necessário\n- Demonstre empatia e compreensão pela situação do cliente\n- Foque em orientações gerais e procedimentos legais\n- Mencione a importância de documentação e prazos quando relevante\n- Seja caloroso e acolhedor, mas mantenha profissionalismo\n\nCONTEXTO ESPECIAL:\n- Você tem acesso aos dados do formulário de captação (nome, área jurídica, situação)\n- Use essas informações para personalizar suas respostas\n- Quando mencionado [Client Intake Data], use esses dados para contextualizar\n- Adapte seu tom baseado na plataforma ([Platform: WEB] ou [Platform: WHATSAPP])\n\nÁREAS DE ESPECIALIZAÇÃO:\n- Direito Penal\n- Direito Civil\n- Direito Trabalhista\n- Direito de Família\n- Direito Empresarial\n\nFORMATO DE RESPOSTA:\n- Para WhatsApp: Máximo 2 parágrafos, linguagem mais direta\n- Para Web: Máximo 3 parágrafos, pode ser mais detalhado\n- Sempre termine sugerindo agendamento de consulta quando apropriado\n- Use emojis moderadamente no WhatsApp, evite no Web\n\nTAREFAS ESPECIAIS:\n- Se receber [TASK: Generate...], foque especificamente na tarefa solicitada\n- Para mensagens de boas-vindas, seja caloroso e profissional\n- Para validação de dados, seja gentil mas claro\n- Para confirmações, seja positivo e tranquilizador\n\nVocê tem acesso ao histórico da conversa para fornecer respostas contextualizadas e personalizadas.",
+  "system_prompt": "Você é um assistente de captação de leads para escritório de advocacia. Sua ÚNICA função é seguir o fluxo estruturado do Firebase EXATAMENTE como definido.\n\nREGRAS CRÍTICAS:\n- NUNCA pule etapas\n- NUNCA mude o texto das perguntas do Firebase\n- NUNCA dê respostas longas ou explicações\n- SEMPRE valide a resposta antes de avançar\n- Se inválida, repita a MESMA pergunta com error_message\n- Se off-topic, redirecione para a pergunta atual\n- Uma mensagem por vez, sem parágrafos longos\n\nSiga APENAS o fluxo do Firebase. Não improvise.",
   "ai_config": {
     "model": "gemini-1.5-flash",
-    "temperature": 0.7,
-    "max_tokens": 1000,
-    "memory_window": 10,
-    "timeout": 30
+    "temperature": 0.1,
+    "max_tokens": 150,
+    "memory_window": 5,
+    "timeout": 15
   },
   "conversation_settings": {
-    "preserve_context_across_platforms": true,
-    "enable_session_memory": true,
-    "fallback_to_ai_after_flow": true,
-    "phone_collection_triggers_whatsapp": true,
-    "use_ai_for_dynamic_messages": true,
-    "context_aware_responses": true
+    "strict_firebase_flow": true,
+    "no_ai_improvisation": true,
+    "single_message_responses": true,
+    "exact_question_wording": true,
+    "mandatory_validation": true
   },
   "response_guidelines": {
-    "max_paragraphs_web": 3,
-    "max_paragraphs_whatsapp": 2,
+    "max_words": 30,
     "language": "pt-BR",
-    "tone": "professional_empathetic",
-    "always_recommend_consultation": true,
-    "include_legal_disclaimer": true,
-    "personalize_with_intake_data": true
+    "tone": "direct_professional",
+    "no_explanations": true,
+    "no_greetings": true,
+    "follow_firebase_exactly": true
   },
-  "platform_specific": {
-    "whatsapp": {
-      "use_emojis": true,
-      "shorter_responses": true,
-      "greeting_message": "Olá! Sou o assistente jurídico do escritório. Como posso ajudá-lo hoje?",
-      "max_message_length": 300
-    },
-    "web": {
-      "use_emojis": false,
-      "detailed_responses": true,
-      "greeting_message": "Bem-vindo ao nosso escritório de advocacia. Como posso auxiliá-lo com questões jurídicas?",
-      "max_message_length": 500
-    }
-  },
-  "version": "2.0",
-  "last_updated": "2024-01-15T15:00:00Z",
-  "description": "Configuração do sistema de IA para assistente jurídico com integração LangChain + Gemini e suporte a contexto de intake",
   "fallback_flow": {
-    "description": "Fluxo fixo de perguntas usado quando Gemini AI está indisponível",
+    "description": "Fluxo estruturado obrigatório quando Gemini não está disponível",
     "enabled": true,
     "sequential": true,
+    "strict_validation": true,
     "steps": [
       {
-        "id": 0,
-        "field": "review_intro",
-        "question": "Olá! Para garantir que registramos corretamente suas informações, vamos começar do início. Tudo bem?",
-        "validation": {
-          "type": "confirmation",
-          "required": true
-        },
-        "error_message": "Pode me confirmar se está tudo certo para revisarmos do começo?",
-        "confirmation_responses": ["sim", "ok", "tudo bem", "pode ser", "claro", "yes", "certo", "vamos", "confirmo", "vamos lá", "perfeito", "beleza"]
-      },
-      {
         "id": 1,
-        "field": "name",
-        "question": "Oi! Que bom que você está em contato conosco. Para te ajudar, preciso do seu nome completo. Pode me informar?",
+        "field": "full_name",
+        "question": "Qual é o seu nome completo?",
         "validation": {
           "min_length": 2,
           "required": true,
           "type": "name"
         },
-        "error_message": "Por favor, informe seu nome completo para que possamos te atender adequadamente."
+        "error_message": "Por favor, informe seu nome completo."
       },
       {
         "id": 2,
         "field": "area_of_law",
-        "question": "Olá {user_name}, prazer em te conhecer! Em qual área jurídica você precisa de ajuda?\n\n• Penal\n• Civil\n• Trabalhista\n• Família\n• Empresarial",
+        "question": "Em qual área do direito você precisa de ajuda?\n\n• Penal\n• Civil\n• Trabalhista\n• Família\n• Empresarial",
         "validation": {
           "min_length": 3,
           "required": true,
@@ -95,31 +66,31 @@
             "comercial": "Empresarial"
           }
         },
-        "error_message": "Por favor, escolha uma das áreas jurídicas: Penal, Civil, Trabalhista, Família ou Empresarial."
+        "error_message": "Por favor, escolha uma das áreas: Penal, Civil, Trabalhista, Família ou Empresarial."
       },
       {
         "id": 3,
-        "field": "situation",
-        "question": "Ok {user_name}, entendi que se trata de uma questão em {area}. Você poderia me descrever brevemente o que aconteceu? Assim consigo direcionar melhor sua demanda.",
+        "field": "description",
+        "question": "Descreva brevemente sua situação jurídica.",
         "validation": {
           "min_length": 5,
           "required": true,
           "type": "description"
         },
-        "error_message": "Por favor, descreva sua situação com um pouco mais de detalhes para que possamos te ajudar melhor."
+        "error_message": "Por favor, descreva sua situação com mais detalhes."
       },
       {
         "id": 4,
-        "field": "phone_request",
-        "question": "{user_name}, sinto muito que você esteja passando por isso. Para prosseguirmos, preciso do seu número de WhatsApp com DDD para que nosso time jurídico possa entrar em contato e te auxiliar. Você poderia me fornecer?",
+        "field": "phone",
+        "question": "Qual seu número de WhatsApp com DDD? (exemplo: 11999999999)",
         "validation": {
           "min_length": 10,
           "required": true,
           "type": "phone"
         },
-        "error_message": "Por favor, digite seu número de WhatsApp no formato com DDD (exemplo: 11999999999)."
+        "error_message": "Por favor, digite seu número com DDD (exemplo: 11999999999)."
       }
     ],
-    "completion_message": "Perfeito, {user_name}! Suas informações foram registradas com sucesso. Nossa equipe especializada em {area} analisará seu caso e entrará em contato através do WhatsApp {phone} em breve. Obrigado por escolher nossos serviços jurídicos!"
+    "completion_message": "Obrigado, {full_name}! Suas informações sobre {area_of_law} foram registradas. Nossa equipe entrará em contato no WhatsApp {phone} em breve."
   }
 }

@@ -6,7 +6,7 @@ and Gemini AI (conversational responses) with proper fallback handling.
 
 Orchestration Logic:
 1. Firebase as main flow controller (source of truth for steps)
-2. Gemini as secondary assistant (for off-topic/conversational responses)
+2. Off-topic message handling with brief human-like responses
 3. Fallback handling (last resort for failures)
 
 Flow: User message → Orchestrator → [Firebase OR Gemini OR Fallback]
@@ -152,6 +152,65 @@ class CleanOrchestrator:
         """Check if message looks like a Brazilian phone number."""
         clean_message = ''.join(filter(str.isdigit, message))
         return len(clean_message) >= 10 and len(clean_message) <= 13
+
+    def _get_off_topic_response(self, message: str, current_step: int) -> Optional[str]:
+        """
+        Generate brief, human-like responses for off-topic messages.
+        Returns None if message is not off-topic.
+        """
+        message_lower = message.strip().lower()
+        
+        # Common off-topic patterns and responses
+        off_topic_patterns = {
+            # Price/Cost questions
+            ('quanto custa', 'preço', 'valor', 'custo', 'honorário', 'cobrança'): 
+                "Entendo sua preocupação sobre valores, mas vamos primeiro coletar suas informações. Discutiremos isso depois.",
+            
+            # Who will help questions
+            ('quem vai', 'qual advogado', 'quem me ajuda', 'quem atende'): 
+                "Um advogado especializado irá atendê-lo após coletarmos seus dados. Vamos continuar.",
+            
+            # When/timing questions
+            ('quando', 'que horas', 'horário', 'prazo', 'demora'): 
+                "Sobre prazos e horários, nossa equipe explicará tudo depois. Vamos finalizar seu cadastro primeiro.",
+            
+            # Where/location questions
+            ('onde', 'endereço', 'localização', 'escritório'): 
+                "Informações sobre localização serão fornecidas em breve. Vamos continuar com suas informações.",
+            
+            # How it works questions
+            ('como funciona', 'como é', 'processo', 'procedimento'): 
+                "Explicaremos todo o processo depois. Agora vamos focar em conhecer sua situação.",
+            
+            # General greetings/small talk
+            ('como vai', 'tudo bem', 'boa tarde', 'boa noite', 'obrigado', 'valeu'): 
+                "Obrigado! Vamos continuar com o atendimento.",
+            
+            # Experience/credentials questions
+            ('experiência', 'formação', 'especialista', 'qualificação'): 
+                "Nossa equipe é altamente qualificada. Vamos primeiro entender seu caso.",
+            
+            # Success rate questions
+            ('taxa de sucesso', 'quantos casos', 'resultados'): 
+                "Temos ótimos resultados, mas cada caso é único. Vamos conhecer o seu primeiro.",
+            
+            # Urgency expressions
+            ('urgente', 'rápido', 'emergência', 'pressa'): 
+                "Entendemos a urgência. Para agilizar, vamos completar suas informações rapidamente."
+        }
+        
+        # Check if message matches any off-topic pattern
+        for keywords, response in off_topic_patterns.items():
+            if any(keyword in message_lower for keyword in keywords):
+                logger.info(f"🔄 Off-topic message detected: {message[:30]}...")
+                return response
+        
+        # Check for very short responses that might be greetings
+        if len(message.strip()) <= 3 and message_lower in ['oi', 'olá', 'ok', 'sim', 'não']:
+            return "Vamos continuar com o atendimento."
+        
+        # Not off-topic
+        return None
 
     def _is_step_response(self, message: str, step_id: int) -> bool:
         """
@@ -315,6 +374,35 @@ class CleanOrchestrator:
             return "Qual é o seu nome completo?", False
 
     async def _handle_gemini_response(
+        self, 
+        message: str, 
+        session_data: Dict[str, Any]
+    ) -> str:
+        """
+        Handle off-topic messages with brief human-like responses.
+        """
+        try:
+            current_step = session_data.get("current_step", 1)
+            
+            # Check if this is an off-topic message
+            off_topic_response = self._get_off_topic_response(message, current_step)
+            if off_topic_response:
+                return off_topic_response
+            
+            # If not off-topic, redirect to current Firebase step
+            flow = await self._get_conversation_flow()
+            steps = flow.get("steps", [])
+            current_step_data = next((s for s in steps if s["id"] == current_step), None)
+            
+            if current_step_data:
+                return current_step_data["question"]
+            return "Qual é o seu nome completo?"
+                
+        except Exception as e:
+            logger.error(f"❌ Error handling off-topic message: {str(e)}")
+            return "Qual é o seu nome completo?"
+
+    async def _handle_gemini_response_old(
         self, 
         message: str, 
         session_data: Dict[str, Any]
@@ -516,14 +604,21 @@ Perfeito! Suas informações foram registradas com sucesso. Nossa equipe entrar�
             
             # Invalid/off-topic response - redirect to current Firebase step
             else:
-                logger.info(f"🔄 Off-topic/invalid - redirecting to Firebase step {current_step}")
+                logger.info(f"🔄 Off-topic/invalid message - handling with brief response")
                 
                 # Get current Firebase step question
                 flow = await self._get_conversation_flow()
                 steps = flow.get("steps", [])
                 current_step_data = next((s for s in steps if s["id"] == current_step), None)
                 
-                redirect_response = current_step_data["question"] if current_step_data else "Qual é o seu nome completo?"
+                # Handle off-topic message with brief response + current step question
+                off_topic_response = self._get_off_topic_response(message, current_step)
+                if off_topic_response and current_step_data:
+                    # Combine brief off-topic response with current step question
+                    combined_response = f"{off_topic_response}\n\n{current_step_data['question']}"
+                else:
+                    # Fallback to just the current step question
+                    combined_response = current_step_data["question"] if current_step_data else "Qual é o seu nome completo?"
                 
                 session_data["last_updated"] = ensure_utc(datetime.now(timezone.utc))
                 await save_user_session(session_id, session_data)
@@ -532,9 +627,10 @@ Perfeito! Suas informações foram registradas com sucesso. Nossa equipe entrar�
                     "response_type": "firebase_redirect",
                     "platform": platform,
                     "session_id": session_id,
-                    "response": redirect_response,
+                    "response": combined_response,
                     "current_step": session_data.get("current_step", current_step),
                     "flow_completed": session_data.get("flow_completed", False),
+                    "off_topic_handled": bool(off_topic_response),
                     "message_count": session_data["message_count"]
                 }
 

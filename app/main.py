@@ -21,6 +21,7 @@ from app.routes.whatsapp import router as whatsapp_router
 # Import services for startup
 from app.services.firebase_service import initialize_firebase
 from app.services.baileys_service import baileys_service
+from app.services.orchestration_service import clean_orchestrator
 
 # Load environment variables from .env file
 load_dotenv()
